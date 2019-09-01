@@ -1,0 +1,516 @@
+---
+title: "Stats369 - Assignment 2"
+author: "Hong Man Li"
+authorid: "1203125"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r }
+library('tidyverse')
+library('leaps')
+library('lubridate')
+```
+
+# Chapter one - data cleaning and feature engineering
+
+```{r }
+data <- read_csv('week2.csv')
+```
+
+We will start off first by exploring every variable, with the aim of removing highly improbable values. We will attribute these highly improbable values to mistakes in data entry. A suitable graph will be plotted for visualization where appropriate.
+
+But before we do that, we will drop the column 'total_amount' since it cannot be used to predict the tip (as per assignment instructions on Canvas).
+
+```{r , }
+data <- select(data,-total_amount)
+```
+
+We will have a look at the summary data.
+
+```{r , }
+summary(data)
+```
+
+### We deal with VendorID first.
+```{r }
+unique(data$VendorID)
+```
+VendorID should only have 2 values, and indeed only as 2 values in our dataset. This is acceptable.
+
+### Pickup and dropoff times
+As can be seen from the summary, pickup datetimes range from 08 Jan to 14 Jan, which is exactly the week we are interested in. Dropoff times however range from 08 Jan to 15 Jan, which includes 1 day that is outside of our interested week. Let us explore the start date of these trips which lie outside our week. 
+```{r  }
+data %>% 
+  filter(mday(tpep_dropoff_datetime) == 15) %>%
+  summarise(day_when_trip_started = unique(mday(tpep_pickup_datetime)))
+```
+As seen above, all the trips that ends on the 15th, started on the 14th. I will leave these trips in, because this simply means more data for us, and should not bias our model in any way.
+
+### Passenger count
+From our summary of the data generated previously, it seems there are taxis which carries 9 passengers. This is improbably as a quick google search revealed that New York taxis can carry a maximum of 5 passengers.
+```{r  }
+data %>%
+  group_by(passenger_count) %>%
+  tally()
+```
+
+As can be seen from the tally table, the majority of taxis have 6 or less passengers. This is reasonable, as we do not expect a taxi to have a larger capacity than a 7 seater car. Hence we will filter out all rows with over 6 passengers.
+
+```{r  }
+data <- data %>% filter(passenger_count<7)
+```
+
+### Longitudes and latitudes for pickup and dropoff points.
+
+As discussed in class, we will keep only the longitudes/latitudes which are within New York city. The latitude range is 40.5774 to 40.9176, while it is 74.15 to 73.7004 for longitude.
+
+```{r  }
+
+data <- data %>% 
+  filter(dropoff_longitude > -74.15 & dropoff_longitude < -73.7004) %>%
+  filter(pickup_longitude > -74.15 & pickup_longitude < -73.7004) %>%
+  filter(dropoff_latitude < 40.9176 & dropoff_latitude > 40.5774) %>%
+  filter(pickup_latitude < 40.9176 & pickup_latitude > 40.5774)
+
+```
+
+As suggested by the assignment instructions, we will recode the latitude and longitude into categories as they are not expected to have linear relationships with tip amount. How do we code it? Well we will first look at their distribution using ggplot.
+
+```{r  }
+data %>% 
+  ggplot(aes(dropoff_latitude,dropoff_longitude)) + geom_hex() + labs(title="Drop off areas")
+
+data %>%
+  ggplot(aes(pickup_latitude,pickup_longitude)) + geom_hex() + labs(title="Pick up areas")
+
+```
+
+By eyeballing the two graphs, we see that some locations have particularly high pick up and drop off rates. I have recorded the approximate boundaries of these hotspots below:
+
+Hot spot 1 - Latitude 40.7 to 40.8, longitude -74.05 to -73.93
+Hot spot 2 - Latitude 40.75 to 40.8, longitude -73.85 to -73.9
+
+Additionally, the airport is expected to have high pick up and drop off rates. A quick google search revealed that the John F Kennedy airport is located at latitude 40.64 and longitude -73.78. This corresponds to a mild color change in the pick up areas, and again by eyeballing the boundaries are approximated to be:
+Latitude 40.63 to 40.67
+Longitude -73.76 to -73.8
+
+Time to make a new column: it will label an instance as either "hotspot1", "hotspot2", "airport" or "others".
+```{r  }
+data <- data %>% 
+  mutate(hotspots = case_when(pickup_latitude >= 40.68 & pickup_latitude <= 40.83 & pickup_longitude >= -74.05 & pickup_longitude <=                                   -73.93 ~ "hotspot1",
+                              pickup_latitude >= 40.75 & pickup_latitude <= 40.8 & pickup_longitude >= -73.9 & pickup_longitude <= -73.85                               ~ "hotspot2",
+                              pickup_latitude > 40.63 & pickup_latitude<40.67 &
+                               pickup_longitude > -73.8 & pickup_longitude < -73.76 ~ "airport",
+                             dropoff_latitude > 40.63 & dropoff_latitude<40.67 &
+                               dropoff_longitude > -73.8 & dropoff_longitude < -73.76 ~ "airport",
+                              TRUE ~ "others"))
+
+
+```
+
+
+### Rate code ID
+This should be from 1 to 6.
+```{r  }
+data %>% group_by(RatecodeID) %>% tally()
+```
+We will remove the 24 rows coded as 99, as that code is outside the range specified in the documentation. 
+
+```{r  }
+data <- filter(data, RatecodeID < 7)
+```
+
+### Store and forward flag
+
+```{r  }
+data %>% group_by(store_and_fwd_flag) %>% tally()
+```
+Things look normal here, no action required.
+
+### Payment type and tip amount
+
+As discussed in class, cash payments should have tip amount of 0. We will see if this is the case for all the data, and if not, use code to change it so that this is the case.
+
+```{r  }
+data %>%
+  filter(payment_type == 2) %>%
+  summarise(wrong=sum(tip_amount!=0))
+```
+These 15 rows need changing!
+```{r  }
+data <- data %>%
+  mutate(tip_amount=ifelse(payment_type==2 & tip_amount!=0, 0, tip_amount))
+```
+
+Now, in the summary generated at the very beginning, there were negative tips, and also tips that were up to $900! Let's look at the distribution before deciding what to do.
+
+```{r  }
+data %>%
+  mutate(tip_amount=cut(data$tip_amount,10)) %>%
+  group_by(tip_amount) %>%
+  tally()
+```
+We will remove the tip amounts that are greater than $400 as they can safely be considered as outliers that have undue influences, given how infrequent they occurred and how much larger they are than all the other values.
+
+```{r  }
+data <- data %>% filter(tip_amount<400)
+```
+
+```{r  }
+data %>%
+  filter(tip_amount > 0) %>%
+  summarise(n())
+```
+Only 12 rows have negative tip amounts - we will remove them from our dataset as negative tips are not realistic.
+```{r  }
+data <- filter(data, tip_amount >= 0)
+```
+
+### Fare amount
+
+Let's have a look at the distribution of this variable.
+```{r  }
+#Code here adapted from lecture 12
+data %>%
+  ggplot(aes(x=fare_amount)) + geom_histogram(breaks = seq(0:100)-.5) + xlim(0,100)
+```
+Again, we will remove negative fares.
+
+```{r  }
+data <- data %>% filter(fare_amount >= 0)
+```
+
+### Extra
+
+This variable can only be $0, $0.5, or $1 ($1.5 not included as it is not realistic that it is both rush hour and overnight).
+```{r  }
+unique(data$extra)
+```
+Unfortunately there are a whole range of values for this. Here is what we will do. First we round all extra charges to the nearest 0.5, then for charges above $1, we will reduce to $1. For charges below $0, we will change to $0. 
+```{r  }
+data <- data %>% mutate(extra=plyr::round_any(extra,accuracy=0.5)) %>%
+  mutate(extra=ifelse(extra > 1, 1, extra)) %>%
+  mutate(extra=ifelse(extra < 0, 0, extra))
+unique(data$extra)
+```
+
+### MTA tax
+```{r  }
+data %>% group_by(mta_tax) %>% summarise(n())
+```
+Similarly as before, this variable should only take on values of $0 or $0.5. We will tackle it using the same approach as before.
+```{r  }
+data <- data %>%
+  mutate(mta_tax=ifelse(mta_tax > 0.5, 0.5, mta_tax)) %>%
+  mutate(mta_tax=ifelse(mta_tax < 0, 0, mta_tax))
+```
+
+
+### Improvement surcharge
+```{r  }
+data %>% group_by(improvement_surcharge) %>% summarise(n())
+```
+Similarly as before, this variable should only take on values of $0 or $0.3. We will tackle it using the same approach as before.
+```{r  }
+data <- data %>%
+  mutate(improvement_surcharge=ifelse(improvement_surcharge > 0.3, 0.3, improvement_surcharge)) %>%
+  mutate(improvement_surcharge=ifelse(improvement_surcharge < 0, 0, improvement_surcharge))
+```
+
+### Tolls amount
+
+Let's have a look at the distribution of this variable in a table. Cutting it into bins helps with the visualization.
+```{r  }
+data %>% mutate(tolls_amount=cut(tolls_amount,10)) %>% count(tolls_amount)
+```
+
+To simplify things we will simply remove negative tolls...
+
+```{r  }
+data <- data %>% filter(tolls_amount >= 0)
+```
+
+Now, finally, adding in a few columns as per lecture 12.
+We extract day of week from the pick up datetime.
+We extract the hour of day when the pick up of passengers took place.
+We extract duration of trip (by measuring time difference between drop off and pick up time).
+We also renamed the payment_type column for interpretability.
+```{r  }
+data <- data %>%
+  mutate(dow = wday(tpep_pickup_datetime,label=TRUE,abbr=TRUE, week_start = 1),                         
+         hour_trip_start = factor(hour(tpep_pickup_datetime)),                                   
+         trip_duration = as.numeric(difftime(tpep_dropoff_datetime,tpep_pickup_datetime,units="mins")),          payment_type_label = fct_recode(factor(payment_type), 
+                                         "Credit Card"="1",
+                                         "Cash"="2",
+                                         "No Charge"="3",
+                                         "Other"="4"))
+```
+
+Justification for adding day of week - this is a reasonable expectation as weekends and weekdays should have different proportions of travellers to airport, which affects the fares paid and tips given. As seen below, Sunday and Monday have the highest trips to/from airport.
+
+```{r  }
+data %>%  
+  filter(hotspots=="airport") %>%
+  group_by(dow) %>%
+  summarise(trips_to_airport=n()) %>%
+  ggplot(aes(x=dow,y=trips_to_airport)) + geom_bar(stat='identity')
+```
+
+Justification for adding hour of trip start - as seen below, it matters! During lunch time the amount of tip given is lower than any other time during the day.
+
+```{r  }
+set.seed(1203125)
+data %>% sample_n(50000) %>% 
+  group_by(hour_trip_start) %>%
+  summarize(mean_tip=mean(tip_amount)) %>%
+  ggplot(aes(x=hour_trip_start,y=mean_tip)) +geom_point()+geom_line(aes(group=1))
+```
+
+
+# Chapter two - model building
+
+```{r  }
+#Latitude and longitude can be dropped here, cause we have categorized it previously with the "hotspots" and "airports" columns.
+data <- select(data, -c(pickup_longitude,pickup_latitude,dropoff_longitude,dropoff_latitude))
+
+#Also, pickup and dropoff date time can also be dropped. We have extracted all the information we need by creating the columns hour_trip_start, trip_duration and dow. Also! Payment type has been replaced by payment type label so the column will be dropped too!
+data <- select(data, -c(tpep_pickup_datetime,tpep_dropoff_datetime, payment_type))
+
+#We MUST continue to drop columns otherwise there is simply not enough ram to do this. 
+data <- select(data, -c(extra, mta_tax, improvement_surcharge, tolls_amount, store_and_fwd_flag))
+
+order <- colnames(data)
+```
+
+It is not possible to fit every 2 way interaction on the computer as it requires too much space. We will have to apply some common sense to determine which interaction is important. We will fit an interaction between hour_trip_start and day of week, as it makes sense that the tip amount varies between a Monday morning and a Monday night, and that day of week changes the effect of hour_trip_start on tip amount. We will do a simple test of this theory via plotting.
+
+```{r  }
+set.seed(1203125)
+data %>% sample_n(100000) %>% 
+  group_by(dow, hour_trip_start) %>%
+  summarize(mean_tip=mean(tip_amount)) %>%
+  ggplot(aes(x=hour_trip_start,y=mean_tip)) +geom_point()+geom_line(aes(group=1)) + 
+  facet_wrap(~dow)
+```
+As evident from the graph above, each particular combination of dow and trip_hour_start produces a different mean tip amount. We can move foward feeling confident that this interaction is important.
+
+### Separation into training and testing sets
+
+Code here is adapted predominantly from lab 3.
+```{r  }
+#We MUST sample, even though we only have a single interaction, as the resulting matrix is still too large and cause computer to lag. We will now create training and validating data - for validation of number of parameters later.
+
+set.seed(1203125)
+sample <- sample.int(n = nrow(data), size=500000, replace = F)
+train_x <- data[sample, ]
+train_y <- train_x$tip_amount
+set.seed(1203125)
+test_x  <- data[-sample, ] %>% sample_n(200000)
+test_y <- test_x$tip_amount
+mf<-model.frame(tip_amount~. + hour_trip_start:dow, data=train_x)
+```
+
+```{r  }
+train_X<-model.matrix(tip_amount~. + hour_trip_start:dow, mf)[,-1]
+```
+
+### Tuning lambda for AIC calculations
+
+```{r  }
+#Code adapted from lab 3
+allyhat<-function(xtrain, ytrain, xtest,lambdas,nvmax=20){
+  n<-nrow(xtrain)
+  yhat<-matrix(nrow=nrow(xtest),ncol=length(lambdas))
+  search<-regsubsets(xtrain,ytrain, nvmax=nvmax, method="back")
+  summ<-summary(search)
+  for(i in 1:length(lambdas)){
+    penMSE<- n*log(summ$rss)+lambdas[i]*(1:nvmax)
+    best<-which.min(penMSE)  #lowest AIC
+    betahat<-coef(search, best) #coefficients
+    xinmodel<-cbind(1,xtest)[,summ$which[best,]] #predictors in that model
+    yhat[,i]<-xinmodel%*%betahat
+  }
+  yhat
+}
+
+set.seed(1203125)
+n<-nrow(train_X)
+folds<-sample(rep(1:10,length.out=n))
+lambdas<-c(2,4,6,8,10,12)
+fitted<-matrix(nrow=n,ncol=length(lambdas))
+for(k in 1:10){
+  train<- (1:n)[folds!=k]
+  test<-(1:n)[folds==k]
+  fitted[test,]<-allyhat(train_X[train,],train_y[train],train_X[test,],lambdas)  
+}
+colMeans((train_y-fitted)^2)
+```
+
+It seems like we can't really tune the lambda value as the MSPE for different lambda values are all the same. We will try tuning the number of parameters, p. 
+
+### Tuning the number of variables, p
+
+```{r  }
+#We will use our training data in regsubsets - I have changed nvmax to 40 so as to be more thorough
+search = regsubsets(train_X, train_y, nvmax =40, method = "backward")
+
+#But we will use our validating data for getting MSPE of the different number of predictors
+mf1<-model.frame(tip_amount~. + hour_trip_start:dow, data=test_x)
+test_X<-model.matrix(tip_amount~. + hour_trip_start:dow, mf1)[,-1]
+
+MSPE = numeric(20)
+for (p in 1:20){    
+  betahat<-coef(search, p)
+  xinmodel<-cbind(1,test_X)[,summary(search)$which[p,]]
+  yhat1<-xinmodel%*%betahat    
+  MSPE[p]<-mean( (test_y-yhat1)^2)
+  }
+
+best <- which.min(MSPE)
+```
+
+The variable "MSPE" gives us the MSPE for each number of predictors, not the apparent error, as the testing set was not used in the regsubsets function. The minimum MSPE belongs to the 4 variable model. Let us extract the betahats for the 4 variable model.
+
+```{r  }
+betahat <- coef(search, best)
+betahat
+```
+
+There we go! This is our model!
+
+
+
+# Assessing our accuracy using week 4 data!
+
+```{r }
+#Need to clear up memory otherwise can't even knit...
+rm(train_X, test_X, data)
+invisible(gc())
+
+week4 <- read_csv("week4.csv")
+```
+
+We must drop the columns in week 4 that are not present in our model, and create the ones that are in our model.
+
+The follow lines of code is simply cleaning the week 4 data using the same methods applied to week 2. I won't be commenting what they do they are simply copy and pasted from the cleaning applied to week 2.
+```{r  }
+
+week4 <- week4 %>%
+  mutate(tip_amount=ifelse(payment_type==2 & tip_amount!=0, 0, tip_amount)) %>%
+  filter(tip_amount>=0 & fare_amount>=0)
+
+week4 <- week4 %>%
+  mutate(dow = wday(tpep_pickup_datetime,label=TRUE,abbr=TRUE, week_start = 1),                         
+         hour_trip_start = factor(hour(tpep_pickup_datetime)),                                   
+         trip_duration = as.numeric(difftime(tpep_dropoff_datetime,tpep_pickup_datetime,units="mins")),          payment_type_label = fct_recode(factor(payment_type), 
+                                         "Credit Card"="1",
+                                         "Cash"="2",
+                                         "No Charge"="3",
+                                         "Other"="4"))
+```
+
+```{r  }
+week4 <- week4 %>% 
+  filter(dropoff_longitude > -74.15 & dropoff_longitude < -73.7004) %>%
+  filter(pickup_longitude > -74.15 & pickup_longitude < -73.7004) %>%
+  filter(dropoff_latitude < 40.9176 & dropoff_latitude > 40.5774) %>%
+  filter(pickup_latitude < 40.9176 & pickup_latitude > 40.5774)
+
+week4 <- week4 %>% 
+  mutate(hotspots = case_when(pickup_latitude >= 40.68 & pickup_latitude <= 40.83 & pickup_longitude >= -74.05 & pickup_longitude <=                                   -73.93 ~ "hotspot1",
+                              pickup_latitude >= 40.75 & pickup_latitude <= 40.8 & pickup_longitude >= -73.9 & pickup_longitude <= -73.85                               ~ "hotspot2",
+                              pickup_latitude > 40.63 & pickup_latitude<40.67 &
+                               pickup_longitude > -73.8 & pickup_longitude < -73.76 ~ "airport",
+                             dropoff_latitude > 40.63 & dropoff_latitude<40.67 &
+                               dropoff_longitude > -73.8 & dropoff_longitude < -73.76 ~ "airport",
+                              TRUE ~ "others"))
+
+
+week4 <- select(week4, -c(pickup_longitude,pickup_latitude,dropoff_longitude,dropoff_latitude))
+
+
+week4 <- select(week4, -c(tpep_pickup_datetime,tpep_dropoff_datetime, payment_type))
+
+ 
+week4 <- select(week4, -c(extra, mta_tax, improvement_surcharge, tolls_amount, store_and_fwd_flag,total_amount))
+
+```
+
+```{r  }
+#We need to reorder it so it is in the same order as our week 2 columns
+week4 <- select(week4,VendorID,passenger_count, trip_distance,RatecodeID, fare_amount, tip_amount, hotspots, dow, hour_trip_start,trip_duration,payment_type_label)
+
+set.seed(1203125)
+#week4 <- week4 %>% sample_n(500000)
+week4_y <- week4$tip_amount
+mf2<-model.frame(tip_amount~. + hour_trip_start:dow, data=week4)
+week4_x<-model.matrix(tip_amount~. + hour_trip_start:dow, mf2)[,-1]
+```
+
+```{r  }
+Xpred = cbind(1, week4_x)[,summary(search)$which[best,]]
+yhat2<-Xpred%*%betahat    
+RSS <- sum((week4_y-yhat2)^2)
+RSS
+```
+
+# Final report
+
+### Evaluation of model accuracy
+
+How do we interpret this? Well we will simply follow the guideline from the textbook "An introduction to statistical learning". To make this interpretable, we will simply calculate the R squared value.
+```{r  }
+#Let's get this TSS business first
+ymean <- mean(week4$tip_amount)
+TSS <- sum((ymean-week4_y)^2)
+
+#Now, lets calculate R squared!
+Rsquared <- 1 - RSS/TSS
+Rsquared
+```
+
+Let us also get an RSE value.
+
+```{r  }
+RSE <- sqrt(RSS/length(week4_y))
+RSE
+```
+There we go!
+
+So, how do we interpret this?
+R squared value is simply the proportion of variability of the data that is explained by our model. The higher the better. To get an intuitive insight of what this is, imagine TSS as all the differences between the actual tip_amount and the mean, and RSS as the difference between the actual tip_amount and the predicted tip_amount. The difference between RSS and TSS is those error distances which our model has accounted for, and then if we divide by overall error TSS, we get a proportion value showing how much variability in the data is accounted for!
+
+0.51 is marginally acceptable. There are many possible explanations why it is so low. First I was forced to drop quite a few columns due to computer ram constraints. Second, I did not use all of the data available, and only a sample of it, again due to computer ram constraints.
+
+As to the RSE value, it simply refers to the how much on average a tip would differ from our predicted value. It is an absolute value, so we can make the statement that on average a tip would be within plus or minus $1.8 range of our predicted value. Considering that the mean tip amount is :
+```{r  }
+ymean
+```
+this RSE value is again not perfect.
+
+### How model was built
+
+At every step of this file I have explained what I was doing and the rationale behind it. However, for completion's sake I will again summarize the steps I took to reach my selected model.
+
+1. Data cleaning
+- Latitude and longitude was recoded into categories - labelled as hotspots and airports. These categories were obtained from hex graphs and also from a search on the coordinates of the JHK airport.
+- Pickup and dropoff times were separated into day of week, trip duration and hour of day. This allows a more indepth analysis into how tip may vary with the predictor TIME.
+- Unrealistic values (mainly negative charges) were removed from the dataset.
+- When payment type is labelled as cash, tip was set to 0.
+
+2. Model building
+- Columns that are redundant are dropped. For example, pickup and dropoff times are not needed as we have all that information in day of week, trip duration, hour of day... etc. This applies to latitude and longitude columns where the information is represented by the hotspots column.
+- MTA_tax, tolls, surcharges, extras, are all dropped due to space issues and as they are not expected to be strong predictors.
+- I used a single interaction - between day of week and hour of trip. It is realistic that hour of day does affect day of week's effect on tip.
+- I used cross validation to try to select an optimal lambda value for calculating AIC, but it appeared that all lambda values are the same and no optimization can happen here.
+- I then tried to tune the optimal number of variables p. I did this using a for loop iterating through possible number of variables from 1 to 20, then assessing the MSPE of each p in the regsubsets results. My final model was:
+```{r  }
+coef(search,best)
+```
+
+-There are many minor and fine points mentioned within the file but not mentioned here. But the main changes are captured here.
+
+Model accuracy I have already discussed.
