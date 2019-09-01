@@ -1,5 +1,5 @@
 ---
-title: "Stats369 - Assignment 2"
+title: "Predicting tip amount for yellow taxis in New York"
 author: "Hong Man Li"
 authorid: "1203125"
 output: html_document
